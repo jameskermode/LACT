@@ -64,7 +64,9 @@ def fix_periodicity_relative(X,box_size,show=False):
         print("Number of changed coordinates:",kk)
         
 def fix_periodicity_relative_flat(X,box_size,show=False):
-    """ Transform an atomistic configuration *difference* X to ensure each difference spans at most half of the simulation box in each dimension Here X is a flat dN vector.
+    """ Transform an atomistic configuration *difference* X
+        to ensure each difference spans at most half 
+        of the simulation box in each dimension Here X is a flat dN vector.
     """
     kk = 0
     allowed_directions = (np.array(box_size[1]) - np.array(box_size[0]))/2

@@ -10,18 +10,13 @@ from .utils import *
 
 try:
     from mpi4py import MPI
-    comm = MPI.COMM_WORLD
-    rank = comm.Get_rank()
-    size = comm.Get_size()
     parallel = True
 except ImportError:
     print("mpi4py not found, serial runs only!")
-    rank = 0
-    size = 1
     parallel = False
 
 class atom_cont_system:
-    def __init__(self,lmp,update_command):
+    def __init__(self,lmp,update_command,comm=None):
         self.lmp = lmp
         self.org_box = lmp.extract_box()
         self.natoms = lmp.extract_global("natoms")
@@ -35,16 +30,27 @@ class atom_cont_system:
         }
 
         self.change_cont_param = lambda x : update_command(x,self.org_box)
+
+        if parallel:
+            rank = comm.Get_rank()
+            size = comm.Get_size()
+            self.rank = rank
+            self.size = size
+            self.comm = comm
+        else:
+            self.rank = 0
+            self.size = 1
+            self.comm = None
         
         
     def quasi_static_run(self,μ_start,increment,n_iter,verbose=False):
-        if rank == 0:
+        if self.rank == 0:
             print('''
             %%%%%%%%%%%%%%%%%%%%%%%%%%%
             A quasi-static run: adjust μ and minimise in LAMMPS
             ''')
         if len(self.data["Y_s"]) > 0:
-            if rank == 0:
+            if self.rank == 0:
                 print("Warning: System contains some data already!")
         for k in range(n_iter):
             μ = μ_start + k*increment
@@ -55,7 +61,7 @@ class atom_cont_system:
             if k < 2:
                 ref_X_flat = self.ref_X.flatten()
                 ref_X_flat = ((3*self.natoms)*c_double)(*ref_X_flat)
-                self.lmp.scatter_atoms("x", 1, 3, ref_X_flat)    
+                self.lmp.scatter_atoms("x", 1, 3, ref_X_flat)
             self.lmp.command('run 0')
             self.lmp.command('min_style cg')
             self.lmp.command('minimize 0 1e-5 3000 3000')
@@ -68,7 +74,7 @@ class atom_cont_system:
             self.data["Y_s"] += [_Y]
             if verbose:
                 Ys = self.data["Y_s"]
-                if rank == 0:
+                if self.rank == 0:
                     print("Iteration step: ",k+1," ",", Solution step: ",len(Ys)," ",", Continuation parameter: ", Ys[-1][-1])
                 
     
@@ -76,7 +82,7 @@ class atom_cont_system:
         self.lmp.commands_string(self.change_cont_param(Y[-1]))
         box_size = self.lmp.extract_box()[:2]
         Y_x = Y[0:-1]
-        fix_periodicity_flat(Y_x,box_size)
+        fix_periodicity_flat(Y_x,box_size) 
         Y_x = ((len(Y_x))*c_double)(*Y_x)
         # synchronize the coordinates
         if parallel:
@@ -95,12 +101,12 @@ class atom_cont_system:
         Ydot = Ydot / np.linalg.norm(Ydot)
 
         self.lmp.command('run 0')
-        if size == 1:
+        if self.size == 1:
             f_t = self.lmp.numpy.extract_compute('forces',LMP_STYLE_ATOM,LMP_TYPE_ARRAY)
             _IDS = self.lmp.numpy.extract_compute('ids',LMP_STYLE_ATOM,LMP_TYPE_VECTOR).astype('int32')
         else:
-            f_t = extract_comp_parallel(comm, self.lmp, 'forces',LMP_STYLE_ATOM, LMP_TYPE_ARRAY, self.natoms)
-            _IDS = extract_comp_parallel(comm, self.lmp, 'ids',LMP_STYLE_ATOM, LMP_TYPE_VECTOR, self.natoms, type='int32')
+            f_t = extract_comp_parallel(self.comm, self.lmp, 'forces',LMP_STYLE_ATOM, LMP_TYPE_ARRAY, self.natoms)
+            _IDS = extract_comp_parallel(self.comm, self.lmp, 'ids',LMP_STYLE_ATOM, LMP_TYPE_VECTOR, self.natoms, type='int32')
 
         #print(f_t)
         #print(_IDS)
@@ -112,9 +118,9 @@ class atom_cont_system:
         G = np.append(G,last_eqn)
         return G
     
-    def continuation_step(self,ds,verbose = False):
+    def continuation_step(self,ds,verbose = False,maxiter=6):
         if verbose:
-            if rank != 0:
+            if self.rank != 0:
                 verbose = False
         Ys = self.data["Y_s"]
         assert len(Ys) > 1
@@ -129,7 +135,7 @@ class atom_cont_system:
                        method='krylov',
                        options={'disp': verbose,
                                 'fatol': 1e-4,
-                                'maxiter': 6,
+                                'maxiter': maxiter,
                                 'line_search': 'armijo' ,
                                 'jac_options': {'inner_M': None, 
                                                 'method': 'lgmres'}},
@@ -144,8 +150,9 @@ class atom_cont_system:
                      ds_smallest = 1e-3,
                      ds_largest = 2e0,
                      verbose=True,
+                     maxiter=6
                     ):
-        if rank == 0:
+        if self.rank == 0:
             print('''
             %%%%%%%%%%%%%%%%%%%%%%%%%%%
             A continuation run: solve extended system to find points on the solution path.
@@ -153,14 +160,14 @@ class atom_cont_system:
         counter = 0
         ds = ds_default
         for k in range(n_iter):
-            Y_1 = self.continuation_step(ds,verbose=verbose)
+            Y_1 = self.continuation_step(ds,verbose=verbose,maxiter=maxiter)
             if Y_1.success == False:
                 ds = ds/2
                 if ds > ds_smallest:
-                    if rank == 0:
+                    if self.rank == 0:
                         print("ds halved, now equal to ", ds, ". We go 2 steps back.")
                 else:
-                    if rank == 0:
+                    if self.rank == 0:
                         print("ds now below the threshold, equal to ", ds, ".  Aborting...")
                     break
                 res_at = -2
@@ -172,15 +179,15 @@ class atom_cont_system:
                 counter += 1
                 if counter > 5 and ds < ds_largest:
                     ds = 2*ds
-                    if rank == 0:
+                    if self.rank == 0:
                         print("ds doubled, now equal to ", ds, ".")
                     counter = 0
 
                 Ys = self.data["Y_s"]
-                if rank == 0:
+                if self.rank == 0:
                     print("Iteration step: ",k+1," ",", Solution step: ",len(Ys)," ",", Continuation parameter: ", Ys[-1][-1])
                 if np.sign(Ys[-1][-1] - Ys[-2][-1])*np.sign(Ys[-2][-1] - Ys[-3][-1]) < 0.0:
-                    if rank == 0:
+                    if self.rank == 0:
                         print("turn, turn, turn")
                     
                     
