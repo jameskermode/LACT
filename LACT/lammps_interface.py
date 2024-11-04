@@ -8,6 +8,18 @@ from scipy import optimize
 
 from .utils import *
 
+try:
+    from mpi4py import MPI
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
+    size = comm.Get_size()
+    parallel = True
+except ImportError:
+    print("mpi4py not found, serial runs only!")
+    rank = 0
+    size = 1
+    parallel = False
+
 class atom_cont_system:
     def __init__(self,lmp,update_command):
         self.lmp = lmp
@@ -26,12 +38,14 @@ class atom_cont_system:
         
         
     def quasi_static_run(self,μ_start,increment,n_iter,verbose=False):
-        print('''
-        %%%%%%%%%%%%%%%%%%%%%%%%%%%
-        A quasi-static run: adjust μ and minimise in LAMMPS
-        ''')
+        if rank == 0:
+            print('''
+            %%%%%%%%%%%%%%%%%%%%%%%%%%%
+            A quasi-static run: adjust μ and minimise in LAMMPS
+            ''')
         if len(self.data["Y_s"]) > 0:
-            print("Warning: System contains some data already!")
+            if rank == 0:
+                print("Warning: System contains some data already!")
         for k in range(n_iter):
             μ = μ_start + k*increment
             # if verbose:
@@ -54,7 +68,8 @@ class atom_cont_system:
             self.data["Y_s"] += [_Y]
             if verbose:
                 Ys = self.data["Y_s"]
-                print("Iteration step: ",k+1," ",", Solution step: ",len(Ys)," ",", Continuation parameter: ", Ys[-1][-1])
+                if rank == 0:
+                    print("Iteration step: ",k+1," ",", Solution step: ",len(Ys)," ",", Continuation parameter: ", Ys[-1][-1])
                 
     
     def pass_ext_variable_info(self,Y):
@@ -63,6 +78,9 @@ class atom_cont_system:
         Y_x = Y[0:-1]
         fix_periodicity_flat(Y_x,box_size)
         Y_x = ((len(Y_x))*c_double)(*Y_x)
+        # synchronize the coordinates
+        if parallel:
+            MPI.COMM_WORLD.Barrier()
         self.lmp.scatter_atoms("x", 1, 3, Y_x)
     
     
@@ -77,8 +95,15 @@ class atom_cont_system:
         Ydot = Ydot / np.linalg.norm(Ydot)
 
         self.lmp.command('run 0')
-        f_t = self.lmp.numpy.extract_compute('forces',LMP_STYLE_ATOM,LMP_TYPE_ARRAY)
-        _IDS = self.lmp.numpy.extract_compute('ids',LMP_STYLE_ATOM,LMP_TYPE_VECTOR).astype('int32')
+        if size == 1:
+            f_t = self.lmp.numpy.extract_compute('forces',LMP_STYLE_ATOM,LMP_TYPE_ARRAY)
+            _IDS = self.lmp.numpy.extract_compute('ids',LMP_STYLE_ATOM,LMP_TYPE_VECTOR).astype('int32')
+        else:
+            f_t = extract_comp_parallel(comm, self.lmp, 'forces',LMP_STYLE_ATOM, LMP_TYPE_ARRAY, self.natoms)
+            _IDS = extract_comp_parallel(comm, self.lmp, 'ids',LMP_STYLE_ATOM, LMP_TYPE_VECTOR, self.natoms, type='int32')
+
+        #print(f_t)
+        #print(_IDS)
         f_t = f_t[np.argsort(_IDS)]
         G = f_t.flatten()
         YminusY0 = Y-Y0
@@ -88,6 +113,9 @@ class atom_cont_system:
         return G
     
     def continuation_step(self,ds,verbose = False):
+        if verbose:
+            if rank != 0:
+                verbose = False
         Ys = self.data["Y_s"]
         assert len(Ys) > 1
         self.pass_ext_variable_info(Ys[-1])
@@ -96,7 +124,6 @@ class atom_cont_system:
         fix_periodicity_relative_flat(Ydot[:-1],box_size)
         Ydot = Ydot / np.linalg.norm(Ydot)
         Y_0 = Ys[-1] + ds*Ydot
-
         Y_1 = scipy.optimize.root(self.extended_system, Y_0,
                        args=(ds),
                        method='krylov',
@@ -118,10 +145,11 @@ class atom_cont_system:
                      ds_largest = 2e0,
                      verbose=True,
                     ):
-        print('''
-        %%%%%%%%%%%%%%%%%%%%%%%%%%%
-        A continuation run: solve extended system to find points on the solution path.
-        ''')
+        if rank == 0:
+            print('''
+            %%%%%%%%%%%%%%%%%%%%%%%%%%%
+            A continuation run: solve extended system to find points on the solution path.
+            ''')
         counter = 0
         ds = ds_default
         for k in range(n_iter):
@@ -129,9 +157,11 @@ class atom_cont_system:
             if Y_1.success == False:
                 ds = ds/2
                 if ds > ds_smallest:
-                    print("ds halved, now equal to ", ds, ". We go 2 steps back.")
+                    if rank == 0:
+                        print("ds halved, now equal to ", ds, ". We go 2 steps back.")
                 else:
-                    print("ds now below the threshold, equal to ", ds, ".  Aborting...")
+                    if rank == 0:
+                        print("ds now below the threshold, equal to ", ds, ".  Aborting...")
                     break
                 res_at = -2
                 self.data["Y_s"] = self.data["Y_s"][:res_at]
@@ -142,13 +172,16 @@ class atom_cont_system:
                 counter += 1
                 if counter > 5 and ds < ds_largest:
                     ds = 2*ds
-                    print("ds doubled, now equal to ", ds, ".")
+                    if rank == 0:
+                        print("ds doubled, now equal to ", ds, ".")
                     counter = 0
 
                 Ys = self.data["Y_s"]
-                print("Iteration step: ",k+1," ",", Solution step: ",len(Ys)," ",", Continuation parameter: ", Ys[-1][-1])
+                if rank == 0:
+                    print("Iteration step: ",k+1," ",", Solution step: ",len(Ys)," ",", Continuation parameter: ", Ys[-1][-1])
                 if np.sign(Ys[-1][-1] - Ys[-2][-1])*np.sign(Ys[-2][-1] - Ys[-3][-1]) < 0.0:
-                    print("turn, turn, turn")
+                    if rank == 0:
+                        print("turn, turn, turn")
                     
                     
     def dump_data(self,path,file_name):
