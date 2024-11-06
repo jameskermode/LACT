@@ -476,10 +476,11 @@ class atom_cont_system_remappable:
                     
     def dump_data(self,path,file_name):
         Ys = self.data["Y_s"]
-        if os.path.exists(path) == False:
-            os.makedirs(path)
-        elif os.path.exists(path+file_name):
-            os.remove(path+file_name)
+        if self.rank == 0:
+            if os.path.exists(path) == False:
+                os.makedirs(path)
+            elif os.path.exists(path+file_name):
+                os.remove(path+file_name)
 
         for i in range(len(Ys)):
             self.pass_ext_variable_info(Ys[i])
