@@ -16,6 +16,7 @@ try:
 except ImportError:
     print("mpi4py not found, serial runs only!")
     parallel = False
+import os
 
 class atom_cont_system:
     def __init__(self,lmp,update_command,comm=None):
@@ -251,8 +252,8 @@ class atom_cont_system_remappable:
 
     def reset_atoms_and_μ(self):
         """reset atom positions in LAMMPS to U_0 and μ to μ_0"""
-        if self.rank == 0:
-            print("resetting atoms and μ...")
+        # if self.rank == 0:
+        #     print("resetting atoms and μ...")
         self.change_cont_param(self.μ_0)
         self.update_lammps_positions(self.U_0, self.image_arr_0)
         self.lmp.command('set group all image 0 0 0') #reset all the image IDS to 0
@@ -308,8 +309,8 @@ class atom_cont_system_remappable:
         
     def add_correction_to_positions(self, Y):
         """add the correction to the atom positions"""
-        if self.rank == 0:
-            print("adding correction...")
+        # if self.rank == 0:
+        #     print("adding correction...")
         X, image_arr = self.get_positions_from_lammps()
         X += Y[:-1].reshape(self.natoms,3)
         self.update_lammps_positions(X, image_arr)
@@ -376,10 +377,9 @@ class atom_cont_system_remappable:
         assert len(Ys) > 1
         Y0 = Ys[-1]
         Ydot = Ys[-1] - Ys[-2]
-        box_size = self.lmp.extract_box()[:2]
-        fix_periodicity_relative_flat(Ydot[:-1],box_size)
+        # if self.rank == 0:
+        #     print("Max of Ydot is ",np.max(np.abs(Ydot)))
         Ydot = Ydot / np.linalg.norm(Ydot)
-
         self.lmp.command('run 0')
         if self.size == 1:
             f_t = self.lmp.numpy.extract_compute('forces',LMP_STYLE_ATOM,LMP_TYPE_ARRAY)
@@ -388,13 +388,19 @@ class atom_cont_system_remappable:
             f_t = extract_comp_parallel(self.comm, self.lmp, 'forces',LMP_STYLE_ATOM, LMP_TYPE_ARRAY, self.natoms)
             _IDS = extract_comp_parallel(self.comm, self.lmp, 'ids',LMP_STYLE_ATOM, LMP_TYPE_VECTOR, self.natoms, type='int32')
 
-
         f_t = f_t[np.argsort(_IDS)]
         G = f_t.flatten()
         YminusY0 = Y-Y0
-        fix_periodicity_relative_flat(YminusY0[:-1],box_size)
         last_eqn = (YminusY0*Ydot).sum() - ds
+        # if self.rank == 0:
+        #     print('last eq value is ',last_eqn)
         G = np.append(G,last_eqn)
+
+        # if self.rank == 0:
+        #     print("Max of G is ",np.max(np.abs(G)))
+        #     #print("full G is", list(G))
+        #     print("pos of largest G is ",np.argmax(np.abs(G)))
+        # self.lmp.command('write_dump all custom test_cont_dump.lammpstrj id type x y z ix iy iz fx fy fz modify append yes')
         return G
     
     def continuation_step(self,ds,verbose = False,maxiter=6):
@@ -405,9 +411,9 @@ class atom_cont_system_remappable:
         assert len(Ys) > 1
         self.pass_ext_variable_info(Ys[-1])
         Ydot = Ys[-1] - Ys[-2]
-        box_size = self.lmp.extract_box()[:2]
-        fix_periodicity_relative_flat(Ydot[:-1],box_size)
         Ydot = Ydot / np.linalg.norm(Ydot)
+        # print(list(Ydot))
+        # exit()
         Y_0 = Ys[-1] + ds*Ydot
         Y_1 = scipy.optimize.root(self.extended_system, Y_0,
                        args=(ds),
@@ -420,8 +426,6 @@ class atom_cont_system_remappable:
                                                 'method': 'lgmres'}},
                        callback=None)
         return Y_1
-        #self.data["Y_s"] += [Y_1.x]
-        #self.data["ds_s"] += [ds]
         
         
     def continuation_run(self,n_iter,
@@ -429,7 +433,7 @@ class atom_cont_system_remappable:
                      ds_smallest = 1e-3,
                      ds_largest = 2e0,
                      verbose=True,
-                     maxiter=6
+                     maxiter=6,
                     ):
         if self.rank == 0:
             print('''
@@ -472,10 +476,15 @@ class atom_cont_system_remappable:
                     
     def dump_data(self,path,file_name):
         Ys = self.data["Y_s"]
+        if os.path.exists(path) == False:
+            os.makedirs(path)
+        elif os.path.exists(path+file_name):
+            os.remove(path+file_name)
+
         for i in range(len(Ys)):
             self.pass_ext_variable_info(Ys[i])
             s1 = 'write_dump all custom '
-            s2 = f'_{i} id type x y z xu yu zu ix iy iz'
+            s2 = f' id type x y z xu yu zu ix iy iz modify append yes'
             self.lmp.command(s1+path+file_name+s2)
             
             
