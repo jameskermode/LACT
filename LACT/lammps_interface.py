@@ -331,6 +331,7 @@ class atom_cont_system_remappable:
 
         for k in range(n_iter):
             if k>0 or not reset_u0:
+                #print("here1")
                 #reset structure to initial state
                 self.reset_atoms_and_μ()
             # increment continuation parameter
@@ -340,12 +341,16 @@ class atom_cont_system_remappable:
             if k>0 or not reset_u0:
                 # get positions after continuation shift
                 _X_mu_only, image_arr = self.get_positions_from_lammps()
+                #print("here2")
                 # add previous minimisation to atom positions
                 self.add_correction_to_positions(self.data["Y_s"][-1])
             
+            #print("minimizing....")
+            self.lmp.command('thermo 1')
             self.lmp.command('run 0')
             self.lmp.command('min_style cg')
             self.lmp.command('minimize 0 1e-8 5000 5000')
+            #print("minimize done")
             if k == 0 and reset_u0:
                 self.lmp.command('set group all image 0 0 0')
             _X, image_arr = self.get_positions_from_lammps()
@@ -449,7 +454,8 @@ class atom_cont_system_remappable:
             %%%%%%%%%%%%%%%%%%%%%%%%%%%
             A continuation run: solve extended system to find points on the solution path.
             ''')
-        self.clear_checkpoint(checkpoint_path)
+        if checkpoint_freq > 0:
+            self.clear_checkpoint(checkpoint_path)
         counter = 0
         accepted_steps = 0
         if self.overrule_ds is not None:
