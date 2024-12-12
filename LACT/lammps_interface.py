@@ -372,6 +372,7 @@ class atom_cont_system_remappable:
                 if self.rank == 0:
                     print("Iteration step: ",k+1," ",", Solution step: ",len(Ys)," ",", Continuation parameter: ", Ys[-1][-1])
                     # dump data
+            
                 #self.lmp.command(f'write_dump all custom dump.lammpstrj id type x y z ix iy iz modify append yes')
                 
     
