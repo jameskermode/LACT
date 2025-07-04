@@ -258,7 +258,7 @@ class atom_cont_system_remappable:
         """reset atom positions in LAMMPS to U_0 and μ to μ_0"""
         # if self.rank == 0:
         #     print("resetting atoms and μ...")
-        self.change_cont_param(self.μ_0)
+        self.lmp.commands_string(self.change_cont_param(self.μ_0))
         self.update_lammps_positions(self.U_0, self.image_arr_0)
         self.lmp.command('set group all image 0 0 0') #reset all the image IDS to 0
 
@@ -371,6 +371,7 @@ class atom_cont_system_remappable:
                 Ys = self.data["Y_s"]
                 if self.rank == 0:
                     print("Iteration step: ",k+1," ",", Solution step: ",len(Ys)," ",", Continuation parameter: ", Ys[-1][-1])
+                    print("--------------------------------------------------")
                     # dump data
             
                 #self.lmp.command(f'write_dump all custom dump.lammpstrj id type x y z ix iy iz modify append yes')
