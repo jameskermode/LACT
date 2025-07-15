@@ -496,7 +496,11 @@ class atom_cont_system_remappable:
                         print("ds now below the threshold, equal to ", ds, ".  Aborting...")
                     break
                 res_at = -2
-                self.data["Y_s"] = self.data["Y_s"][:res_at]
+                if len(self.data["Y_s"]) <= 3:
+                    if self.rank == 0:
+                        print("Not enough data to go back. Just reducing step size.")
+                else:
+                    self.data["Y_s"] = self.data["Y_s"][:res_at]
                 counter = 0
             else:
                 self.data["Y_s"] += [Y_1.x]
