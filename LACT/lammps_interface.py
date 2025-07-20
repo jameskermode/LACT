@@ -39,7 +39,7 @@ class atom_cont_system:
         self.initial_step = 0
         self.overrule_ds = None
         self.change_cont_param = lambda x : update_command(x)
-
+        self.bond_changes = None
         if parallel and comm is not None:
             rank = comm.Get_rank()
             size = comm.Get_size()
@@ -190,6 +190,34 @@ class atom_cont_system:
         self.lmp.commands_string(self.change_cont_param(Y[-1]))
         self.add_correction_to_positions(Y)
     
+    def get_gradient_wrt_cont_param(self, verbose=False):
+        """If we know the bond changes that the continuation event is meant to be exploring,
+        we compute the gradient of the bond length with respect to the continuation parameter."""
+        if self.bond_changes is None:
+            return None
+
+        # if we have a set of bond changes, then we compute the gradient of Y wrt cont param for each bond change
+        if np.ndim(self.bond_changes) == 1:
+            self.bond_changes = [self.bond_changes]
+
+        for bond_change in self.bond_changes:
+            atom_1 = int(bond_change[0])
+            atom_2 = int(bond_change[1])
+            u0 = self.U_0
+            Ys = self.data["Y_s"]
+            d_eps = Ys[-1][-1] - Ys[-2][-1]
+            Y_reshaped_1 = Ys[-1][:-1].reshape(self.natoms,3)
+            Y_reshaped_2 = Ys[-2][:-1].reshape(self.natoms,3)
+
+            diff_1 = np.linalg.norm((u0[atom_2] + Y_reshaped_2[atom_2]) - (u0[atom_1] + Y_reshaped_2[atom_1]))
+            diff_2 = np.linalg.norm((u0[atom_2] + Y_reshaped_1[atom_2]) - (u0[atom_1] + Y_reshaped_1[atom_1]))
+            d_diff = diff_2 - diff_1
+            
+            grad = d_diff / d_eps
+            if self.rank == 0:
+                print("d_diff for atom pair", atom_1, atom_2, "is", d_diff)
+                print("grad d_bond_length/deps for atom pair", atom_1, atom_2, "is", grad)
+
     
     def extended_system(self,Y,ds,Ydot):
         self.pass_ext_variable_info(Y)
@@ -364,6 +392,7 @@ class atom_cont_system:
             else:
                 self.data["Y_s"] += [Y_1.x]
                 self.data["ds_s"] += [ds]
+                self.get_gradient_wrt_cont_param()
                 counter += 1
                 if counter > 5 and ds < ds_largest:
                     ds = 2*ds
