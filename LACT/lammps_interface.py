@@ -460,7 +460,7 @@ class atom_cont_system:
                         break
                     
                     
-    def dump_data(self,path,file_name,replace=True):
+    def dump_data(self,path,file_name,replace=True,dump_stress=False):
         Ys = self.data["Y_s"]
         if self.rank == 0:
             if os.path.exists(path) == False:
@@ -468,13 +468,30 @@ class atom_cont_system:
             elif os.path.exists(f'{path}/{file_name}.lammpstrj') and replace:
                 print(f"Dump file {path}/{file_name}.lammpstrj exists, replacing...")
                 os.remove(f'{path}/{file_name}.lammpstrj')
-
+        stress_tensors = np.zeros((len(Ys),6))
         for i in range(len(Ys)):
             self.pass_ext_variable_info(Ys[i])
             self.lmp.command('run 0')
             self.lmp.command(f'write_dump all custom {path}/{file_name}.lammpstrj id type x y z ix iy iz fx fy fz modify append yes')
-            
-            
+            if dump_stress:
+                pxx = self.lmp.get_thermo("pxx")
+                pyy = self.lmp.get_thermo("pyy")
+                pzz = self.lmp.get_thermo("pzz")
+                pxy = self.lmp.get_thermo("pxy")
+                pxz = self.lmp.get_thermo("pxz")
+                pyz = self.lmp.get_thermo("pyz")
+                voigt_stress_tensor = -np.array([pxx,pyy,pzz,pyz,pxz,pxy])
+                stress_tensors[i,:] = voigt_stress_tensor
+        
+        if dump_stress and self.rank == 0:
+            if not replace:
+                if os.path.exists(f"{path}/{file_name}_stresses.txt"):
+                    prev_tensors = np.loadtxt(f"{path}/{file_name}_stresses.txt")
+                    stress_tensors = np.vstack((prev_tensors,stress_tensors))
+
+            np.savetxt(f"{path}/{file_name}_stresses.txt", stress_tensors, header="pxx,pyy,pzz,pyz,pxz,pxy")
+
+
     def compute_energies(self):
         Ys = self.data["Y_s"]
         E  = []
