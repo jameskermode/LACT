@@ -83,41 +83,30 @@ def fix_periodicity_relative_flat(X,box_size,show=False):
         print("Number of changed coordinates:",kk)
 
 
-def extract_comp_parallel(comm, lmp, name, lmp_style, lmp_type, natoms, type='float64'):
+def extract_comp_parallel(comm, lmp, name, lmp_style, lmp_type, natoms, dtype='float64'):
     """ Extract compute data in parallel"""
-    dtypes = {'float64': [MPI.DOUBLE, np.float64], 'int32': [MPI.INT32_T, np.int32]}
-    if not parallel:
-        raise Exception("mpi4py not found, cannot run in parallel!")
-    local_v = lmp.numpy.extract_compute(name, lmp_style, lmp_type).astype(type)
-    #print('local_v_size', np.shape(local_v))
-    if len(np.shape(local_v)) == 1:
-        ndim = 1
-    else:
-        ndim = np.shape(local_v)[1]
+    dtypes = {'float64': (MPI.DOUBLE, np.float64), 'int32': (MPI.INT32_T, np.int32)}
 
-    local_v_count = np.size(local_v)
-    #print('local_v_count', local_v_count)
-    counts = comm.allgather(local_v_count)
-    #print('counts', counts)
-    local_v_flat = local_v.flatten()
-    #print('local_v_flat', np.shape(local_v_flat))
+    local_v = lmp.numpy.extract_compute(name, lmp_style, lmp_type).astype(dtypes[dtype][1])
+    local_v_flat = local_v.ravel()
+    local_count = np.array([local_v_flat.size], dtype=np.int32)
+
+    # Gather sizes from all ranks
+    counts = np.empty(comm.size, dtype=np.int32)
+    comm.Allgather(local_count, counts)
 
     displacements = np.insert(np.cumsum(counts[:-1]), 0, 0)
-    #print('displacements', displacements)
+    global_flat = np.empty(counts.sum(), dtype=dtypes[dtype][1])
 
-    total_v_components = sum(counts)
-    #print('total_v_components', total_v_components)
+    # Gather all data into the global array
+    comm.Allgatherv(local_v_flat, [global_flat, counts, displacements, dtypes[dtype][0]])
 
-
-    global_v_flat = np.empty(total_v_components, dtype=dtypes[type][1])  # Flat array to gather into
-
-    comm.Allgatherv(local_v_flat, (global_v_flat, counts, displacements, dtypes[type][0]))
-    #print('global_v_flat', np.shape(global_v_flat))
+    # Restore original shape
+    ndim = 1 if local_v.ndim == 1 else local_v.shape[1]
     if ndim > 1:
-        global_v = global_v_flat.reshape(natoms, ndim)
+        global_v = global_flat.reshape(natoms, ndim)
     else:
-        global_v = global_v_flat
+        global_v = global_flat
 
-    #print('global_v', np.shape(global_v))
     return global_v
     

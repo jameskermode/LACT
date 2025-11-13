@@ -6,8 +6,11 @@ import warnings
 
 import scipy
 from scipy import optimize
-
+from scipy.sparse.linalg import LinearOperator, eigsh
 from .utils import *
+
+from matscipy.optimize import ode12r
+from ase.optimize.sciopt import OptimizerConvergenceError
 
 import matplotlib.pyplot as plt
 
@@ -41,6 +44,7 @@ class atom_cont_system:
         self.overrule_ds = None
         self.change_cont_param = lambda x : update_command(x)
         self.bond_changes = None
+        self.on_saddle=False
         if parallel and comm is not None:
             rank = comm.Get_rank()
             size = comm.Get_size()
@@ -127,8 +131,74 @@ class atom_cont_system:
         X, image_arr = self.get_positions_from_lammps()
         X += Y[:-1].reshape(self.natoms,3)
         self.update_lammps_positions(X, image_arr)
+
+    
+    
+    def minimize_to_saddle(self,μ,maxiter,ftol=1e-5):
+
+        def evf_gradient(x,μ):
+            """
+            Compute modified gradient for eigenvector-following.
+            Used for relaxing to unstable branch
+            
+            Parameters
+            ----------
+            x : ndarray
+                flattened atomic positions (Y[:-1])
+            """
+            xcpy = x.flatten().copy()
+            Y = np.append(xcpy,μ)
+            g = -self.get_force_vector(Y)
+            # if self.rank == 0:
+            #     print("iteration max force component",np.max(np.abs(g)))
+            self.temp_Y = Y
+            self.prev_max_force = np.max(np.abs(g)) 
+
+            vmin = neg_eigvec        
+            g_par = np.dot(g, vmin) * vmin
+            g_perp = g - g_par
+            
+            # Flip sign along lowest mode
+            g_mod = g_perp - g_par
+            return -g_mod
         
-    def quasi_static_run(self,μ_start,increment,n_iter,verbose=False,reset_u0=True,ftol=1e-8):
+        Yin = self.data["Y_s"][-1].copy()
+        Yin[-1] = μ
+        self.temp_Y = Yin.copy()
+        converged = False
+        self.prev_max_force = 100
+        print(f"{self.rank}:here3")
+        if self.rank == 0:
+            print("Starting ode12r minimisation onto saddle...")
+        first_neg_eigvec = None
+        for i in range(int(maxiter/40)):
+            x0 = self.temp_Y[:-1]
+            try:
+                neg_eigvec = self.get_smallest_eigen(self.temp_Y)
+                if first_neg_eigvec is not None:
+                    if np.dot(first_neg_eigvec,neg_eigvec)<0:
+                        neg_eigvec = -neg_eigvec
+                    else:
+                        first_neg_eigvec = neg_eigvec 
+                res_x = ode12r(evf_gradient,x0,args=(μ,),verbose=0,fmax=ftol,steps=40)
+                converged = True
+                if self.rank == 0:
+                    print(f"Optimisation successful after {i+1} eigensolves and {(i*50)+res_x[1]} ode12r iterations")
+                _Y_final = np.append(res_x[0].copy(),μ)
+            except OptimizerConvergenceError:
+                if self.rank == 0:
+                    print("Largest force component:", self.prev_max_force)
+                continue
+            break
+        
+        
+        if converged:
+            return _Y_final, converged
+        else:
+            return Yin, converged
+
+        
+    def quasi_static_run(self,μ_start,increment,n_iter,verbose=False,reset_u0=True,ftol=1e-8,on_saddle=False):
         if self.rank == 0:
             print('''
             %%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -137,15 +207,36 @@ class atom_cont_system:
         if len(self.data["Y_s"]) > 0:
             if self.rank == 0:
                 print("Warning: System contains some data already!")
-
+        print(f"{self.rank}:here0, niter {n_iter}, reset u0, {reset_u0}")
         for k in range(n_iter):
+            print(f"{self.rank}:hereio!!")
             if k>0 or not reset_u0:
+                print(f"{self.rank}:hereio!!2")
                 #print("here1")
                 #reset structure to initial state
                 self.reset_atoms_and_μ()
             # increment continuation parameter
             μ = μ_start + k*increment
-            self.lmp.commands_string(self.change_cont_param(μ))
+            print(f"{self.rank}:here1")
+            # handle the on saddle case
+            if on_saddle:
+                print(f"{self.rank}:here2")
+                # minimize using modified forces and ode12r
+                maxiter = 1000
+                _Y, conv = self.minimize_to_saddle(μ,maxiter,ftol=ftol)
+                if not conv:
+                    if self.rank == 0:
+                        print(f"ode12r Failed to converge in {maxiter} steps")
+                    return False
+                else:
+                    self.data["Y_s"] += [_Y]
+                    continue
+
+            # if not on saddle, normal minimisation
+            cmd = self.change_cont_param(μ)
+            # if self.rank == 0:
+            #     print(cmd)
+            self.lmp.commands_string(cmd)
             self.lmp.command('run 0')
             if k>0 or not reset_u0:
                 # get positions after continuation shift
@@ -160,7 +251,8 @@ class atom_cont_system:
             self.lmp.command('run 0')
             self.lmp.command('min_style cg')
             self.lmp.command(f'minimize 0 {ftol} 5000 5000')
-            #print("minimize done")
+            # self.lmp.command("undump mindumpy")
+            # print("minimize done")
             if k == 0 and reset_u0:
                 self.lmp.command('set group all image 0 0 0')
             _X, image_arr = self.get_positions_from_lammps()
@@ -187,24 +279,46 @@ class atom_cont_system:
                 #self.lmp.command(f'write_dump all custom dump.lammpstrj id type x y z ix iy iz modify append yes')
                 
     
+    def get_smallest_eigen(self,Yin,v0=None):
+        #function which gets the smallest eigenvalue and vector of atomistic system
+        F0 = self.get_force_vector(Yin)
+        eps = 1e-5
+        def Hv_matvec(v):
+            v = v.flatten()
+            v = np.append(v,0.0)
+            Fp = self.get_force_vector((Yin + eps * v))
+            # H v ≈ - (F(x+eps v) - F(x)) / eps
+            return (-(Fp - F0) / eps)
+        n = len(F0)
+        Hlinop = LinearOperator((n, n), matvec=Hv_matvec, dtype=float)
+        if self.rank == 0:
+            print("entering eigensolve...")
+        vals, vecs = eigsh(Hlinop, k=1, which='SA', tol=1e-6, maxiter=500)
+        neg_eigval = vals[0]
+        neg_eigvec = vecs[:,0]
+        if self.rank==0:
+            print("neg_eigval:", neg_eigval)
+            print("neg_eigvec:", neg_eigvec)
+        return neg_eigvec
+
     def pass_ext_variable_info(self,Y):
         self.reset_atoms_and_μ()
         self.lmp.commands_string(self.change_cont_param(Y[-1]))
         self.add_correction_to_positions(Y)
     
-    def get_gradient_wrt_cont_param(self,idx=-1,verbose=False):
+    def get_gradient_wrt_cont_param(self,idx=-1,bond_changes=None,verbose=False):
         """If we know the bond changes that the continuation event is meant to be exploring,
         we compute the gradient of the bond length with respect to the continuation parameter."""
-        if self.bond_changes is None:
+        if bond_changes is None:
             return None
 
         # if we have a set of bond changes, then we compute the gradient of Y wrt cont param for each bond change
-        if np.ndim(self.bond_changes) == 1:
-            self.bond_changes = [self.bond_changes]
+        if np.ndim(bond_changes) == 1:
+            bond_changes = [bond_changes]
 
         bonds_on_saddle = []
         grads = []
-        for bond_change in self.bond_changes:
+        for bond_change in bond_changes:
             atom_1 = int(bond_change[0])
             atom_2 = int(bond_change[1])
             u0 = self.U_0
@@ -236,25 +350,31 @@ class atom_cont_system:
         if self.rank == 0:
             if len(bonds_on_saddle) > 0:
                 print(f"On saddle!")
+                self.on_saddle=True
             else:
                 print(f"Not on saddle!")
+                self.on_saddle=False
         return grads
     
-    def extended_system(self,Y,ds,Ydot):
+    def get_force_vector(self,Y):
         self.pass_ext_variable_info(Y)
-        Ys = self.data["Y_s"]
-        assert len(Ys) > 1
-        Y0 = Ys[-1]
         self.lmp.command('run 0')
         if self.size == 1:
             f_t = self.lmp.numpy.extract_compute('forces',LMP_STYLE_ATOM,LMP_TYPE_ARRAY)
             _IDS = self.lmp.numpy.extract_compute('ids',LMP_STYLE_ATOM,LMP_TYPE_VECTOR).astype('int32')
         else:
             f_t = extract_comp_parallel(self.comm, self.lmp, 'forces',LMP_STYLE_ATOM, LMP_TYPE_ARRAY, self.natoms)
-            _IDS = extract_comp_parallel(self.comm, self.lmp, 'ids',LMP_STYLE_ATOM, LMP_TYPE_VECTOR, self.natoms, type='int32')
+            _IDS = extract_comp_parallel(self.comm, self.lmp, 'ids',LMP_STYLE_ATOM, LMP_TYPE_VECTOR, self.natoms, dtype='int32')
 
         f_t = f_t[np.argsort(_IDS)]
         G = f_t.flatten()
+        return G
+    
+    def extended_system(self,Y,ds,Ydot):
+        G = self.get_force_vector(Y)
+        Ys = self.data["Y_s"]
+        assert len(Ys) > 1
+        Y0 = Ys[-1]
         YminusY0 = Y-Y0
         last_eqn = (YminusY0*Ydot).sum() - ds
         # if self.rank == 0:
@@ -306,12 +426,14 @@ class atom_cont_system:
                      fatol=1e-5,
                      cont_target=None,
                      target_tol=1e-5,
+                     exit_callback=None
                     ):
         if self.rank == 0:
             print('''
             %%%%%%%%%%%%%%%%%%%%%%%%%%%
             A continuation run: solve extended system to find points on the solution path.
             ''')
+        self.killed_by_callback = False
         self.converge_to_target = False
         self.cont_target = cont_target
         if cont_target is not None:
@@ -341,7 +463,7 @@ class atom_cont_system:
                         break
                     else:
                         # we have passed the target, turn converge_to_target on and flip diff_sign
-                        if self.rank == 0:
+                        if self.rank == 0 and not self.converge_to_target:
                             print(f"Passed target continuation parameter {cont_target}, now attempting to converge to it.")
                         self.converge_to_target = True
                         
@@ -355,7 +477,7 @@ class atom_cont_system:
                 Ydot = Ydot / np.linalg.norm(Ydot)
                 mu_diff = self.cont_target - Ys[-1][-1]
                 ds_target = mu_diff/Ydot[-1]
-                if np.abs(ds_target) < ds:
+                if np.abs(ds_target) < np.abs(ds):
                     ds = ds_target
                 else:
                     if np.sign(ds_target) != np.sign(ds):
@@ -384,7 +506,7 @@ class atom_cont_system:
             else:
                 self.data["Y_s"] += [Y_1.x]
                 self.data["ds_s"] += [ds]
-                self.get_gradient_wrt_cont_param()
+                self.get_gradient_wrt_cont_param(bond_changes=self.bond_changes)
                 counter += 1
                 if counter > 5 and ds < ds_largest:
                     ds = 2*ds
@@ -401,6 +523,12 @@ class atom_cont_system:
                     if self.rank == 0:
                         print("turn, turn, turn")
                     if exit_on_turn and accepted_steps > min_steps:
+                        break
+                
+                if exit_callback is not None and not self.converge_to_target:
+                    kill = exit_callback(self)
+                    if kill:
+                        self.killed_by_callback = True
                         break
                     
                     
@@ -590,7 +718,7 @@ class atom_cont_system_legacy:
             _IDS = self.lmp.numpy.extract_compute('ids',LMP_STYLE_ATOM,LMP_TYPE_VECTOR).astype('int32')
         else:
             f_t = extract_comp_parallel(self.comm, self.lmp, 'forces',LMP_STYLE_ATOM, LMP_TYPE_ARRAY, self.natoms)
-            _IDS = extract_comp_parallel(self.comm, self.lmp, 'ids',LMP_STYLE_ATOM, LMP_TYPE_VECTOR, self.natoms, type='int32')
+            _IDS = extract_comp_parallel(self.comm, self.lmp, 'ids',LMP_STYLE_ATOM, LMP_TYPE_VECTOR, self.natoms, dtype='int32')
 
         #print(f_t)
         #print(_IDS)
