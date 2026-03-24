@@ -38,80 +38,110 @@ def _():
 
 @app.cell
 def _(atom_cont_system, lammps):
-    # --- LAMMPS setup: 2 LJ atoms in a non-periodic box ---
-    lmp = lammps(cmdargs=["-screen", "none"])
-    lmp.commands_string(
-        """
-        units         lj
-        dimension     3
-        boundary      f f f
-        atom_style    atomic
-        atom_modify   map yes
+    # Helper to create a fresh dimer system (called twice: once for
+    # quasi-static-only, once for continuation)
+    def make_dimer():
+        lmp = lammps(cmdargs=["-screen", "none"])
+        lmp.commands_string(
+            """
+            units         lj
+            dimension     3
+            boundary      f f f
+            atom_style    atomic
+            atom_modify   map yes
 
-        region box block -50.0 50.0 -50.0 50.0 -50.0 50.0
-        create_box 1 box
-        mass 1 1.0
+            region box block -50.0 50.0 -50.0 50.0 -50.0 50.0
+            create_box 1 box
+            mass 1 1.0
 
-        create_atoms 1 single 0.0 0.0 0.0
-        create_atoms 1 single 1.12246 0.0 0.0
-        reset_atom_ids sort yes
+            create_atoms 1 single 0.0 0.0 0.0
+            create_atoms 1 single 1.12246 0.0 0.0
+            reset_atom_ids sort yes
 
-        pair_style lj/cut 3.0
-        pair_coeff 1 1 1.0 1.0 3.0
+            pair_style lj/cut 3.0
+            pair_coeff 1 1 1.0 1.0 3.0
 
-        # Fix atom 1 at the origin
-        group fixed id 1
-        group mobile id 2
-        fix freeze fixed setforce 0.0 0.0 0.0
+            group fixed id 1
+            group mobile id 2
+            fix freeze fixed setforce 0.0 0.0 0.0
 
-        # Applied pulling force on atom 2 (initially zero)
-        fix pull mobile addforce 0.0 0.0 0.0
-        fix_modify pull energy yes
+            fix pull mobile addforce 0.0 0.0 0.0
+            fix_modify pull energy yes
 
-        # Computes required by LACT
-        compute forces all property/atom fx fy fz
-        compute ids all property/atom id
-        """
-    )
+            compute forces all property/atom fx fy fz
+            compute ids all property/atom id
+            """
+        )
 
-    # The continuation parameter is the applied force.
-    # fix_modify energy yes is needed so LAMMPS minimize accounts for
-    # the work done by the applied force.
-    def update_command(force):
-        return f"""
-        unfix pull
-        fix pull mobile addforce {force} 0.0 0.0
-        fix_modify pull energy yes
-        """
+        def update_command(force):
+            return f"""
+            unfix pull
+            fix pull mobile addforce {force} 0.0 0.0
+            fix_modify pull energy yes
+            """
 
-    system = atom_cont_system(lmp, update_command)
-    return (system,)
+        return atom_cont_system(lmp, update_command)
+
+    return (make_dimer,)
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(
         r"""
-        ## Running the continuation
+        ## Quasi-static load-stepping (for comparison)
 
-        1. **Quasi-static ramp** — increase the applied force in small steps
-           from 0 to 2.0 (well below the fold at $F_{\max}\approx 2.40$).
-           LAMMPS energy minimisation finds the equilibrium at each step.
-        2. **Arclength continuation** — starting from the last quasi-static
-           point, the LACT solver traces the equilibrium path through the fold
-           and back to zero force on the unstable branch.
+        First we try the naive approach: ramp the applied force in small steps
+        from 0 to 3.0 using LAMMPS energy minimisation at each step.
+        This works up to the fold ($F \approx 2.40$), but at the next step
+        there is no energy minimum — the atom flies to the pair-potential
+        cutoff and the solution is lost.
         """
     )
     return
 
 
 @app.cell
-def _(system):
-    # Quasi-static: ramp force from 0 to 2.0 in 5 steps
-    system.quasi_static_run(0.0, 0.5, 5, verbose=True)
+def _(make_dimer, np):
+    # Quasi-static only: force 0 → 3.0 in steps of 0.1
+    qs_system = make_dimer()
+    qs_system.quasi_static_run(0.0, 0.1, 30, verbose=False)
 
-    # Continuation: trace through the fold and back to zero force
-    system.continuation_run(
+    qs_U0 = qs_system.U_0
+    qs_seps = []
+    qs_forces = []
+    for _Y in qs_system.data["Y_s"]:
+        _pos = _Y[:-1].reshape(-1, 3)
+        _r = (qs_U0[1, 0] + _pos[1, 0]) - (qs_U0[0, 0] + _pos[0, 0])
+        qs_seps.append(_r)
+        qs_forces.append(_Y[-1])
+    qs_seps = np.array(qs_seps)
+    qs_forces = np.array(qs_forces)
+    return qs_forces, qs_seps
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(
+        r"""
+        ## Arclength continuation
+
+        Now we use LACT. A short quasi-static ramp seeds the path with a few
+        points, then `continuation_run` takes over and traces smoothly through
+        the fold and back to zero force on the unstable branch.
+        """
+    )
+    return
+
+
+@app.cell
+def _(make_dimer, np):
+    # Continuation system: seed with 5 quasi-static points, then continue
+    cont_system = make_dimer()
+    cont_system.quasi_static_run(0.0, 0.5, 5, verbose=True)
+    n_qs_cont = len(cont_system.data["Y_s"])
+
+    cont_system.continuation_run(
         n_iter=100,
         ds_default=0.1,
         ds_smallest=0.001,
@@ -121,42 +151,50 @@ def _(system):
         cont_target=0.0,
         target_tol=0.05,
     )
-    return
+
+    cont_U0 = cont_system.U_0
+    cont_seps = []
+    cont_forces = []
+    for _Y in cont_system.data["Y_s"]:
+        _pos = _Y[:-1].reshape(-1, 3)
+        _r = (cont_U0[1, 0] + _pos[1, 0]) - (cont_U0[0, 0] + _pos[0, 0])
+        cont_seps.append(_r)
+        cont_forces.append(_Y[-1])
+    cont_seps = np.array(cont_seps)
+    cont_forces = np.array(cont_forces)
+    return cont_forces, cont_seps, n_qs_cont
 
 
 @app.cell
-def _(np, system):
-    # Extract separation and force at each solution point
-    U_0 = system.U_0  # reference positions (natoms, 3)
-
-    separations = []
-    forces = []
-    for Y in system.data["Y_s"]:
-        pos = Y[:-1].reshape(-1, 3)
-        r = (U_0[1, 0] + pos[1, 0]) - (U_0[0, 0] + pos[0, 0])
-        separations.append(r)
-        forces.append(Y[-1])
-
-    separations = np.array(separations)
-    forces = np.array(forces)
-
+def _(np):
     # Analytical LJ force–extension curve
-    # At equilibrium: F_applied = -F_LJ = 24*(1/r^7 - 2/r^13) for sigma=1, eps=1
+    # At equilibrium: F_applied = 24*(1/r^7 - 2/r^13) for sigma=1, eps=1
     r_anal = np.linspace(0.95, 2.5, 500)
     F_anal = 24.0 * (1.0 / r_anal**7 - 2.0 / r_anal**13)
-    return F_anal, forces, r_anal, separations
+    return F_anal, r_anal
 
 
 @app.cell
-def _(F_anal, forces, plt, r_anal, separations):
+def _(F_anal, cont_forces, cont_seps, n_qs_cont, plt, qs_forces, qs_seps, r_anal):
     fig, ax = plt.subplots(figsize=(7, 5))
 
-    ax.plot(r_anal, F_anal, "k-", lw=1, alpha=0.5, label="Analytical LJ")
-    ax.plot(separations, forces, "o-", ms=3, lw=1.5, label="LACT continuation")
+    # Analytical reference
+    ax.plot(r_anal, F_anal, "k-", lw=1, alpha=0.4, label="Analytical LJ")
 
-    # Mark the fold (maximum of analytical curve)
+    # Quasi-static (load-stepping) — shows failure past the fold
+    ax.plot(qs_seps, qs_forces, "s", ms=5, color="C1", alpha=0.7,
+            label="Quasi-static (load-stepping)")
+
+    # Continuation — seed points + arclength
+    ax.plot(cont_seps[:n_qs_cont], cont_forces[:n_qs_cont],
+            "D", ms=5, color="C0", alpha=0.5)
+    ax.plot(cont_seps[n_qs_cont:], cont_forces[n_qs_cont:],
+            "o-", ms=3, lw=1.5, color="C0", label="Arclength continuation")
+
+    # Mark the fold
     i_max = F_anal.argmax()
-    ax.plot(r_anal[i_max], F_anal[i_max], "r*", ms=12, zorder=5, label="Fold (spinodal)")
+    ax.plot(r_anal[i_max], F_anal[i_max], "r*", ms=12, zorder=5,
+            label="Fold (spinodal)")
 
     ax.set_xlabel(r"Separation $r / \sigma$")
     ax.set_ylabel(r"Applied force $F$")
@@ -179,13 +217,16 @@ def _(mo):
         point of the potential ($r^* \approx 1.245\,\sigma$,
         $F_{\max} \approx 2.40\,\varepsilon/\sigma$). Beyond this point:
 
-        - **Load-stepping** would fail: there is no energy minimum at
-          $F > F_{\max}$, so LAMMPS minimisation diverges.
-        - **Arclength continuation** succeeds: it treats force and separation
-          jointly, stepping along the solution curve by arc length. At the
-          fold the force *decreases* while the separation *also decreases*
-          (moving onto the repulsive/unstable branch). The LACT data (blue)
-          traces the full S-curve, matching the analytical result.
+        - **Load-stepping** (orange squares) fails: at $F > F_{\max}$ there
+          is no energy minimum, so the LAMMPS minimiser pushes the atom all
+          the way to the pair-potential cutoff. The solution jumps
+          discontinuously and is lost.
+        - **Arclength continuation** (blue circles) succeeds: it treats force
+          and separation jointly, stepping along the solution curve by arc
+          length. At the fold the force *decreases* while the separation
+          *also decreases* (moving onto the repulsive/unstable branch).
+          The continuation data traces the full S-curve, matching the
+          analytical result exactly.
         """
     )
     return
