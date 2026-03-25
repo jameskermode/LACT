@@ -86,6 +86,7 @@ Interactive [marimo](https://marimo.io) notebooks live in `examples/`:
 |----------|-------------|
 | `demo1_lj_dimer.py` | Two LJ atoms pulled apart — traces the force–extension S-curve through the spinodal fold |
 | `demo2_morse_chain.py` | Six-atom Morse chain with disordered bond strengths — shows which bond snaps first |
+| `demo3_crystal_buckling.py` | 2D hex crystal under uniaxial compression — bifurcation detection and branch switching |
 
 Run with:
 
