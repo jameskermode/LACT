@@ -6,23 +6,31 @@ app = marimo.App()
 
 @app.cell(hide_code=True)
 def _(mo):
-    mo.md(
-        r"""
-        # Demo 1: LJ Dimer — Tracing a Force–Extension Fold
+    mo.md(r"""
+    # Demo 1: LJ dimer — tracing a force-extension fold
 
-        Two Lennard-Jones atoms are pulled apart by an applied force.
-        The force–extension curve has a **fold** (spinodal) at the inflection
-        point of the LJ potential ($r \approx 1.245\,\sigma$). Beyond this
-        point, no static equilibrium exists under force control — the bond
-        snaps. Standard load-stepping fails here because there is no energy
-        minimum to converge to.
+    Two Lennard-Jones atoms are pulled apart by fixing one atom and applying a force to the other.
+    The force-extension curve has a **fold point** bifurcation at the inflection
+    point of the LJ potential ($r \approx 1.245\,\sigma$). Beyond this
+    point, the bond snaps and so any configuration where the two atoms are sufficiently apart is a degenerate equilibrium. Standard quasi-static loading can capture the snapping, but is unable to trace the unstable equilibrium.
 
-        **Arclength continuation** parameterises the solution path by its
-        arc length rather than by the applied force, letting it smoothly
-        traverse the fold and trace the full S-curve onto the unstable
-        (repulsive) branch.
-        """
-    )
+    **Arclength continuation** parameterises the solution path by its
+    arc length rather than by the applied force, letting it smoothly
+    traverse the fold and trace the full S-curve onto the unstable
+    segment.
+
+    Given the simplicity of the system, we actually have an analytical solution tracing the stable and unstable equilibria.
+
+    In this notebook, we will use LACT to trace it numerically using a LAMMPS instance and LACT continuation wrapper.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    We first load the necessary dependencies and define some helper functions:
+    """)
     return
 
 
@@ -33,16 +41,15 @@ def _():
     import matplotlib.pyplot as plt
     from lammps import lammps
     from LACT import atom_cont_system
+
     return atom_cont_system, lammps, mo, np, plt
 
 
 @app.cell
 def _(atom_cont_system, lammps):
-    # Helper to create a fresh dimer system (called twice: once for
-    # quasi-static-only, once for continuation)
     def make_dimer():
-        lmp = lammps(cmdargs=["-screen", "none"])
-        lmp.commands_string(
+        _lmp = lammps(cmdargs=["-screen", "none"])
+        _lmp.commands_string(
             """
             units         lj
             dimension     3
@@ -80,155 +87,286 @@ def _(atom_cont_system, lammps):
             fix_modify pull energy yes
             """
 
-        return atom_cont_system(lmp, update_command)
+        return atom_cont_system(_lmp, update_command)
 
     return (make_dimer,)
 
 
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(
-        r"""
-        ## Quasi-static load-stepping (for comparison)
-
-        First we try the naive approach: ramp the applied force in small steps
-        from 0 to 3.0 using LAMMPS energy minimisation at each step.
-        This works up to the fold ($F \approx 2.40$), but at the next step
-        there is no energy minimum — the atom flies to the pair-potential
-        cutoff and the solution is lost.
-        """
-    )
-    return
-
-
 @app.cell
-def _(make_dimer, np):
-    # Quasi-static only: force 0 → 3.0 in steps of 0.1
-    qs_system = make_dimer()
-    qs_system.quasi_static_run(0.0, 0.1, 30, verbose=False)
+def _(np):
+    def get_separation(sys_obj):
+        """Extract separations and forces from a dimer system's solution data."""
+        _U0 = sys_obj.U_0
+        _seps, _forces = [], []
+        for _Y in sys_obj.data["Y_s"]:
+            _pos = _Y[:-1].reshape(-1, 3)
+            _r = (_U0[1, 0] + _pos[1, 0]) - (_U0[0, 0] + _pos[0, 0])
+            _seps.append(_r)
+            _forces.append(_Y[-1])
+        return np.array(_seps), np.array(_forces)
 
-    qs_U0 = qs_system.U_0
-    qs_seps = []
-    qs_forces = []
-    for _Y in qs_system.data["Y_s"]:
-        _pos = _Y[:-1].reshape(-1, 3)
-        _r = (qs_U0[1, 0] + _pos[1, 0]) - (qs_U0[0, 0] + _pos[0, 0])
-        qs_seps.append(_r)
-        qs_forces.append(_Y[-1])
-    qs_seps = np.array(qs_seps)
-    qs_forces = np.array(qs_forces)
-    return qs_forces, qs_seps
+    # Analytical LJ force-extension curve
+    r_anal = np.linspace(1.1, 2.5, 500)
+    F_anal = 24.0 * (1.0 / r_anal**7 - 2.0 / r_anal**13)
+    return F_anal, get_separation, r_anal
 
 
 @app.cell(hide_code=True)
 def _(mo):
-    mo.md(
-        r"""
-        ## Arclength continuation
+    mo.md(r"""
+    ## Quasi-static loading (for comparison)
 
-        Now we use LACT. A short quasi-static ramp seeds the path with a few
-        points, then `continuation_run` takes over and traces smoothly through
-        the fold and back to zero force on the unstable branch.
-        """
-    )
+    First we try the naive approach: ramp the applied force in small steps
+    from 0 to 3.0 using LAMMPS energy minimisation at each step.
+    This works up to the fold ($F \approx 2.40$) and then the bond snaps and the atom flies to the pair-potential cutoff, landing in the degenerate equilibrium state.
+    """)
     return
 
 
 @app.cell
-def _(make_dimer, np):
-    # Continuation system: seed with 5 quasi-static points, then continue
-    cont_system = make_dimer()
-    cont_system.quasi_static_run(0.0, 0.5, 5, verbose=True)
-    n_qs_cont = len(cont_system.data["Y_s"])
+def _(get_separation, make_dimer):
+    qs_sys = make_dimer()
+    qs_sys.quasi_static_run(0.0, 0.1, 30, verbose=False)
+    qs_seps, qs_forces = get_separation(qs_sys)
+    return qs_forces, qs_seps, qs_sys
 
-    cont_system.continuation_run(
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Arclength continuation
+
+    Now we use the continuation routine in LACT. A short quasi-static ramp seeds the path with a few points, then `continuation_run` takes over and traces smoothly through
+    the fold and back to zero force on the unstable branch.
+    """)
+    return
+
+
+@app.cell
+def _(get_separation, make_dimer):
+    cont_sys = make_dimer()
+    cont_sys.quasi_static_run(0.0, 0.5, 5, verbose=False)
+    n_qs = len(cont_sys.data["Y_s"])
+
+    cont_sys.continuation_run(
         n_iter=100,
-        ds_default=0.1,
+        ds_default=0.01,
         ds_smallest=0.001,
         ds_largest=1.0,
-        verbose=True,
+        verbose=False,
         checkpoint_freq=0,
         cont_target=0.0,
         target_tol=0.05,
     )
 
-    cont_U0 = cont_system.U_0
-    cont_seps = []
-    cont_forces = []
-    for _Y in cont_system.data["Y_s"]:
-        _pos = _Y[:-1].reshape(-1, 3)
-        _r = (cont_U0[1, 0] + _pos[1, 0]) - (cont_U0[0, 0] + _pos[0, 0])
-        cont_seps.append(_r)
-        cont_forces.append(_Y[-1])
-    cont_seps = np.array(cont_seps)
-    cont_forces = np.array(cont_forces)
-    return cont_forces, cont_seps, n_qs_cont
+    cont_seps, cont_forces = get_separation(cont_sys)
+    return cont_forces, cont_seps, cont_sys, n_qs
 
 
-@app.cell
-def _(np):
-    # Analytical LJ force–extension curve
-    # At equilibrium: F_applied = 24*(1/r^7 - 2/r^13) for sigma=1, eps=1
-    r_anal = np.linspace(0.95, 2.5, 500)
-    F_anal = 24.0 * (1.0 / r_anal**7 - 2.0 / r_anal**13)
-    return F_anal, r_anal
+@app.cell(hide_code=True)
+def _(F_anal, cont_forces, cont_seps, n_qs, plt, qs_forces, qs_seps, r_anal):
+    _fig, _ax = plt.subplots(figsize=(7, 5))
 
+    _ax.plot(F_anal, r_anal, "-", lw=5, color="C1", label="Analytical LJ")
+    _ax.plot(qs_forces, qs_seps, "s", ms=5, color="C2", alpha=0.7,
+             label="Quasi-static (load-stepping)")
+    _ax.plot(cont_forces[n_qs:], cont_seps[n_qs:],
+             "-", lw=1.5, color="C0", label="Arclength continuation")
 
-@app.cell
-def _(F_anal, cont_forces, cont_seps, n_qs_cont, plt, qs_forces, qs_seps, r_anal):
-    fig, ax = plt.subplots(figsize=(7, 5))
+    _i_max = F_anal.argmax()
+    _ax.plot(F_anal[_i_max], r_anal[_i_max], "r*", ms=12, zorder=5,
+             label="Fold (spinodal)")
 
-    # Analytical reference
-    ax.plot(r_anal, F_anal, "k-", lw=1, alpha=0.4, label="Analytical LJ")
-
-    # Quasi-static (load-stepping) — shows failure past the fold
-    ax.plot(qs_seps, qs_forces, "s", ms=5, color="C1", alpha=0.7,
-            label="Quasi-static (load-stepping)")
-
-    # Continuation — seed points + arclength
-    ax.plot(cont_seps[:n_qs_cont], cont_forces[:n_qs_cont],
-            "D", ms=5, color="C0", alpha=0.5)
-    ax.plot(cont_seps[n_qs_cont:], cont_forces[n_qs_cont:],
-            "o-", ms=3, lw=1.5, color="C0", label="Arclength continuation")
-
-    # Mark the fold
-    i_max = F_anal.argmax()
-    ax.plot(r_anal[i_max], F_anal[i_max], "r*", ms=12, zorder=5,
-            label="Fold (spinodal)")
-
-    ax.set_xlabel(r"Separation $r / \sigma$")
-    ax.set_ylabel(r"Applied force $F$")
-    ax.set_title("Force–extension curve: LJ dimer pull")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    fig.tight_layout()
-    fig
+    _ax.set_xlabel(r"Applied force $F$")
+    _ax.set_ylabel(r"Separation $r / \sigma$")
+    _ax.set_title("Force-extension curve: LJ dimer pull")
+    _ax.legend()
+    _ax.grid(True, alpha=0.3)
+    _fig.tight_layout()
+    _fig
     return
 
 
 @app.cell(hide_code=True)
 def _(mo):
-    mo.md(
-        r"""
-        ## What happened at the fold?
+    mo.md(r"""
+    ## What happened at the fold?
 
-        The analytical curve (black) shows that the applied force required to
-        hold two LJ atoms at separation $r$ has a **maximum** at the inflection
-        point of the potential ($r^* \approx 1.245\,\sigma$,
-        $F_{\max} \approx 2.40\,\varepsilon/\sigma$). Beyond this point:
+    The analytical curve (orange) shows that the applied force required to
+    hold two LJ atoms at separation $r$ has a **maximum** at the inflection
+    point of the potential ($r^* \approx 1.245\,\sigma$,
+    $F_{\max} \approx 2.40\,\varepsilon/\sigma$).
 
-        - **Load-stepping** (orange squares) fails: at $F > F_{\max}$ there
-          is no energy minimum, so the LAMMPS minimiser pushes the atom all
-          the way to the pair-potential cutoff. The solution jumps
-          discontinuously and is lost.
-        - **Arclength continuation** (blue circles) succeeds: it treats force
-          and separation jointly, stepping along the solution curve by arc
-          length. At the fold the force *decreases* while the separation
-          *also decreases* (moving onto the repulsive/unstable branch).
-          The continuation data traces the full S-curve, matching the
-          analytical result exactly.
-        """
+    For applied forces below that threshold, we have two possible equilibria: a stable one and an unstable one. At the bifurcation point they collide and beyond it, the bond snaps and atoms become separate beyond their interaction radius.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Representative configurations
+
+    The dimer at key points along the continuation curve: near equilibrium,
+    at the fold, and on the unstable (repulsive) branch. The arrow shows
+    the applied force direction and magnitude.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(cont_forces, cont_seps, cont_sys, n_qs, np, plt):
+    _n_cont = len(cont_sys.data["Y_s"])
+    _i_fold = n_qs + np.argmax(cont_forces[n_qs:])
+    _snapshots = [
+        (0,              "Equilibrium (F=0)"),
+        (_i_fold,        "At the fold"),
+        (_n_cont - 1,    "Unstable branch"),
+    ]
+
+    _fig, _axes = plt.subplots(1, 3, figsize=(15, 3))
+    _U0 = cont_sys.U_0
+    _max_force = np.max(np.abs(cont_forces))
+
+    for _ax, (_idx, _title) in zip(_axes, _snapshots):
+        _Y = cont_sys.data["Y_s"][_idx]
+        _dev = _Y[:-1].reshape(-1, 3)
+        _pos = _U0 + _dev
+        _F = _Y[-1]
+        _r = cont_seps[_idx]
+
+        # Atoms
+        _ax.scatter(_pos[:, 0], [0, 0], s=300, c=["grey", "C0"],
+                    edgecolors="k", lw=1, zorder=5)
+        _ax.annotate("fixed", (_pos[0, 0], -0.15), ha="center", fontsize=8, color="grey")
+        _ax.annotate("mobile", (_pos[1, 0], -0.15), ha="center", fontsize=8, color="C0")
+
+        # Force arrow
+        if abs(_F) > 0.01:
+            _arrow_len = 0.3 * _F / _max_force
+            _ax.annotate("", xy=(_pos[1, 0] + _arrow_len, 0),
+                         xytext=(_pos[1, 0], 0),
+                         arrowprops=dict(arrowstyle="->", color="red", lw=2))
+
+        # Bond line
+        _ax.plot([_pos[0, 0], _pos[1, 0]], [0, 0], "k--", lw=0.8, alpha=0.5)
+
+        _ax.set_title(f"{_title}\n$r = {_r:.3f}\\sigma$, $F = {_F:.2f}$")
+        _ax.set_xlim(_pos[0, 0] - 0.3, _pos[1, 0] + 0.5)
+        _ax.set_ylim(-0.3, 0.3)
+        _ax.set_aspect("equal")
+        _ax.set_yticks([])
+        _ax.grid(True, alpha=0.2)
+
+    _fig.tight_layout()
+    _fig
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Interactive explorer
+
+    Slide along the continuation curve. The left panel shows the dimer
+    configuration; the right panel shows the force-extension curve with a
+    red dot marking the current point.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    sys_dropdown = mo.ui.dropdown(
+        options={"Quasi-static": "qs", "Continuation": "cont"},
+        value="Continuation",
+        label="System",
     )
+    sys_dropdown
+    return (sys_dropdown,)
+
+
+@app.cell(hide_code=True)
+def _(cont_sys, mo, qs_sys, sys_dropdown):
+    _systems = {"qs": qs_sys, "cont": cont_sys}
+    _n_pts = len(_systems[sys_dropdown.value].data["Y_s"])
+    idx_slider = mo.ui.slider(
+        start=0, stop=_n_pts - 1, step=1, value=0,
+        label="Index along curve",
+    )
+    idx_slider
+    return (idx_slider,)
+
+
+@app.cell(hide_code=True)
+def _(
+    F_anal,
+    cont_forces,
+    cont_seps,
+    cont_sys,
+    get_separation,
+    idx_slider,
+    n_qs,
+    np,
+    plt,
+    qs_forces,
+    qs_seps,
+    qs_sys,
+    r_anal,
+    sys_dropdown,
+):
+    _systems = {"qs": qs_sys, "cont": cont_sys}
+    _active = _systems[sys_dropdown.value]
+    _idx = idx_slider.value
+    _Y = _active.data["Y_s"][_idx]
+    _U0 = _active.U_0
+    _dev = _Y[:-1].reshape(-1, 3)
+    _pos = _U0 + _dev
+    _F = _Y[-1]
+    _act_seps, _ = get_separation(_active)
+    _r = _act_seps[_idx]
+    _max_force = max(np.max(np.abs(cont_forces)), np.max(np.abs(qs_forces)))
+
+    _fig, (_ax_l, _ax_r) = plt.subplots(1, 2, figsize=(14, 5),
+                                         gridspec_kw={"width_ratios": [1, 1.5]})
+
+    # ── Left: dimer configuration ──
+    _ax_l.scatter(_pos[:, 0], [0, 0], s=400, c=["grey", "C0"],
+                  edgecolors="k", lw=1, zorder=5)
+    _ax_l.annotate("fixed", (_pos[0, 0], -0.2), ha="center", fontsize=9, color="grey")
+    _ax_l.annotate("mobile", (_pos[1, 0], -0.2), ha="center", fontsize=9, color="C0")
+
+    if abs(_F) > 0.01:
+        _arrow_len = 0.4 * _F / _max_force
+        _ax_l.annotate("", xy=(_pos[1, 0] + _arrow_len, 0),
+                        xytext=(_pos[1, 0], 0),
+                        arrowprops=dict(arrowstyle="->", color="red", lw=2.5))
+
+    _ax_l.plot([_pos[0, 0], _pos[1, 0]], [0, 0], "k--", lw=0.8, alpha=0.5)
+    _ax_l.set_title(f"$r = {_r:.3f}\\sigma$, $F = {_F:.2f}$")
+    _ax_l.set_xlim(_pos[0, 0] - 0.4, max(_pos[1, 0] + 0.6, 2.0))
+    _ax_l.set_ylim(-0.4, 0.4)
+    _ax_l.set_aspect("equal")
+    _ax_l.set_yticks([])
+    _ax_l.grid(True, alpha=0.2)
+
+    # ── Right: force-extension with current point ──
+    _ax_r.plot(F_anal, r_anal, "-", lw=6, color="C1", label="Analytical LJ")
+    _ax_r.plot(qs_forces, qs_seps, "s", ms=4, color="C2", alpha=0.5,
+               label="Quasi-static")
+    _ax_r.plot(cont_forces[n_qs:], cont_seps[n_qs:],
+               "-", lw=1.2, color="C0", alpha=0.5, label="Continuation")
+
+    _ax_r.plot(_F, _r, "o", ms=12, color="red", zorder=10, label="Current point")
+
+    _ax_r.set_xlabel(r"Applied force $F$")
+    _ax_r.set_ylabel(r"Separation $r / \sigma$")
+    _ax_r.set_title("Force-extension curve")
+    _ax_r.legend(fontsize=8)
+    _ax_r.grid(True, alpha=0.3)
+
+    _fig.tight_layout()
+    _fig
     return
 
 
