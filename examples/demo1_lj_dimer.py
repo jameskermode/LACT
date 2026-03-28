@@ -29,7 +29,7 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    We first load the necessary dependencies and define some helper functions:
+    We first load the necessary dependencies and define some helper functions, which include creating a LAMMPS instance, passing on the simulation setup and the update command associated with the continuation parameter (magnitude of the force applied to an atom):
     """)
     return
 

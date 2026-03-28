@@ -84,9 +84,10 @@ Interactive [marimo](https://marimo.io) notebooks live in `examples/`:
 
 | Notebook | Description |
 |----------|-------------|
-| `demo1_lj_dimer.py` | Two LJ atoms pulled apart — traces the force–extension S-curve through the spinodal fold |
+| `demo1_lj_dimer.py` | Two LJ atoms pulled apart — traces the force–extension S-curve through the fold point |
 | `demo2_morse_chain.py` | Six-atom Morse chain with disordered bond strengths — shows which bond snaps first |
-| `demo3_crystal_buckling.py` | 2D hex crystal under uniaxial compression — bifurcation detection and branch switching |
+| `demo3_crystal_buckling.py` | 2D hex crystal under uniaxial compression — tracing a complicated pitchfork bifurcation |
+| `demo4_vacancy_migration.py` | 3D two species system with a vacancy — tracing complicated vacancy migration pathways using a potential parameter for continuation  |
 
 Run with:
 
@@ -114,6 +115,10 @@ If you use LACT in your research, please cite it:
 > M. Buze and F. Birks, *LACT (LAMMPS Continuation Techniques)*, https://github.com/mbuze/LACT
 
 See [`CITATION.cff`](CITATION.cff) for machine-readable metadata.
+
+LACT was developed in part when working on:
+
+> Birks, F., Ghanem, I., Pastewka, L., Kermode, J., & Buze, M. (2026). Resolving Structural Avalanches in Amorphous Carbon with Arclength Continuation. arXiv preprint arXiv:2601.22933.
 
 ## License
 
