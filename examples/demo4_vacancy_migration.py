@@ -5,7 +5,7 @@
 #     "numpy",
 #     "matplotlib",
 #     "plotly",
-#     "marimo-precompute>=0.3.0",
+#     "marimo-precompute>=0.3.4",
 # ]
 # ///
 
